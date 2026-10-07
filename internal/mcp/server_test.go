@@ -1,13 +1,18 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/oisee/vibing-steampunk/embedded/deps"
 	"github.com/oisee/vibing-steampunk/internal/config"
 )
 
@@ -241,5 +246,71 @@ func TestDebuggerGetVariablesSchemaIncludesItems(t *testing.T) {
 
 	if items["type"] != "string" {
 		t.Fatalf("expected variable_ids.items.type to be 'string', got %v", items["type"])
+	}
+}
+
+func TestEnsureProxyJARIsAvailableDoesNotRewriteIdenticalJar(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.GlobalConfig{JcoLibsDir: dir}
+	if err := ensureProxyJARIsAvailable(cfg); err != nil {
+		t.Fatalf("first extraction failed: %v", err)
+	}
+	before, err := os.Stat(cfg.JcoProxyJar)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg2 := &config.GlobalConfig{JcoLibsDir: dir}
+	if err := ensureProxyJARIsAvailable(cfg2); err != nil {
+		t.Fatalf("second extraction failed: %v", err)
+	}
+	after, err := os.Stat(cfg2.JcoProxyJar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("identical proxy JAR was replaced; a running sidecar JVM would lose its file")
+	}
+}
+
+func TestEnsureProxyJARIsAvailableReplacesStaleJarAtomically(t *testing.T) {
+	dir := t.TempDir()
+	proxyPath := filepath.Join(dir, "jco-proxy.jar")
+	if err := os.WriteFile(proxyPath, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a running sidecar that holds the old JAR open.
+	held, err := os.Open(proxyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	cfg := &config.GlobalConfig{JcoLibsDir: dir}
+	if err := ensureProxyJARIsAvailable(cfg); err != nil {
+		t.Fatalf("extraction failed: %v", err)
+	}
+
+	got, err := os.ReadFile(proxyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, deps.GetEmbeddedProxyJar()) {
+		t.Error("stale proxy JAR was not replaced with embedded content")
+	}
+	old, err := io.ReadAll(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(old) != "stale" {
+		t.Errorf("open handle saw modified content %q; replacement was not atomic", old)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected only jco-proxy.jar in %s, found %d entries", dir, len(entries))
 	}
 }

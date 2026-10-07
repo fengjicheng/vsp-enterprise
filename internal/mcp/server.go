@@ -4,6 +4,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -230,7 +231,15 @@ func ensureProxyJARIsAvailable(cfg *config.GlobalConfig) error {
 	if err := os.MkdirAll(extractDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory for proxy JAR: %s, %v", proxyPath, err)
 	}
-	if err := os.WriteFile(proxyPath, data, 0644); err != nil {
+
+	// Another vsp process may have this JAR open in its JCo sidecar JVM. Truncating it
+	// in place would corrupt that JVM's lazy class loading, so skip identical content
+	// and otherwise replace the file atomically.
+	if existing, err := os.ReadFile(proxyPath); err == nil && bytes.Equal(existing, data) {
+		cfg.JcoProxyJar = proxyPath
+		return nil
+	}
+	if err := writeFileAtomic(proxyPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write proxy JAR to %s: %v", proxyPath, err)
 	}
 
@@ -241,6 +250,29 @@ func ensureProxyJARIsAvailable(cfg *config.GlobalConfig) error {
 	}
 
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in the target directory and renames it
+// over path, so readers holding the old file open keep seeing consistent content.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // fileExists returns true if the path exists and is a regular file.
