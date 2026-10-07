@@ -125,6 +125,23 @@ For a named system in `.vsp.json`:
 
 Set `--browser-exec` or `browser_exec` to use the automated Chromium fallback instead. A custom `--browser-auth-url` also requires that fallback because arbitrary login targets cannot redirect the reentrance ticket to VSP. The automated browser uses a dedicated persistent profile; `VSP_BROWSER_DATA_DIR` overrides its location.
 
+### Sharing one backend across MCP clients
+
+By default every MCP client session (each Claude Code chat, Copilot, …) starts its own VSP process with its own SAP session, JCo sidecar and SSO login. Add `--shared` to the server arguments to let all sessions with the same configuration share one background daemon instead:
+
+```json
+"args": ["--multi-system", "--config", "/path/to/config.json", "--shared"]
+```
+
+The MCP client configuration stays stdio-based. The first session starts the daemon; further sessions attach to it over a per-user Unix domain socket (macOS, Linux and Windows 10 1803+). The daemon stops after `--shared-idle-timeout` (default `10m`) without clients. A different binary or configuration gets its own daemon. If no daemon can be started, VSP serves the session in-process as before.
+
+```bash
+./build/vsp daemon status   # list daemons, connected clients, systems
+./build/vsp daemon stop     # stop all daemons; open sessions respawn one on their next request
+```
+
+Daemon logs are written to `~/Library/Logs/vsp/` (macOS) or `<user cache dir>/vsp/logs/` (Linux: `~/.cache`, Windows: `%LOCALAPPDATA%`). All sessions share the SAP session, so object locks and the debugger are shared too. On Windows, run `vsp daemon stop` before replacing `vsp.exe`.
+
 ### Useful CLI utilities
 
 ```bash

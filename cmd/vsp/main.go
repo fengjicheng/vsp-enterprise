@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/oisee/vibing-steampunk/internal"
 	"github.com/oisee/vibing-steampunk/internal/config"
+	"github.com/oisee/vibing-steampunk/internal/daemon"
 	"github.com/oisee/vibing-steampunk/internal/mcp"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/spf13/cobra"
@@ -255,8 +257,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Handle browser-based SSO authentication (single-system mode only)
-	// This must run after Bootstrap because it requires browser interaction
 	if !multiSystem {
 		// Copy cookie auth from env for single-system mode when flags are not provided.
 		// Cookie loading itself is done in mcp.NewServer.
@@ -268,9 +268,44 @@ func runServer(cmd *cobra.Command, _ []string) error {
 				sys.CookieString = viper.GetString("COOKIE_STRING")
 			}
 		}
+	}
 
-		if err := processBrowserAuthSingleSystem(cmd); err != nil {
+	// Shared mode: bridge this stdio session to a common background daemon
+	// instead of opening an own SAP connection. Falls back to in-process serving
+	// only if no daemon can be started.
+	var shared *daemon.Daemon
+	if sharedMode || sharedDaemonMode {
+		key, err := sharedKey(bootstrappedCfg)
+		if err != nil {
 			return err
+		}
+		if sharedDaemonMode {
+			shared, err = daemon.Listen(key, sharedIdleTimeout, daemon.Info{Version: Version, Systems: systemIDs(bootstrappedCfg)})
+			if err != nil {
+				return err
+			}
+		} else {
+			err := runSharedShim(key)
+			if !errors.Is(err, daemon.ErrSpawnFailed) {
+				return err
+			}
+			_, _ = fmt.Fprintf(os.Stderr, "[VSP-SHARED] %v; serving this session in-process\n", err)
+		}
+	}
+	// fail reports startup errors to shims waiting on the daemon.
+	fail := func(err error) error {
+		if shared != nil {
+			shared.Fail(err)
+			shared.Wait()
+		}
+		return err
+	}
+
+	// Handle browser-based SSO authentication (single-system mode only)
+	// This must run after Bootstrap because it requires browser interaction
+	if !multiSystem {
+		if err := processBrowserAuthSingleSystem(cmd); err != nil {
+			return fail(err)
 		}
 	}
 
@@ -282,7 +317,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Create and start the unified server (works for both single and multi-system)
 	srv, err := mcp.NewServer(bootstrappedCfg, runtimeCookies)
 	if err != nil {
-		return fmt.Errorf("server creation failed: %w", err)
+		return fail(fmt.Errorf("server creation failed: %w", err))
 	}
 	defer func() {
 		if err := srv.Shutdown(); err != nil && cfg.Verbose {
@@ -298,6 +333,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// system's readiness (see System.EnsureReady) so the first call is slow but
 	// succeeds.
 	srv.ConnectAsync()
+
+	if shared != nil {
+		shared.Ready(srv.HTTPHandler())
+		shared.Wait()
+		return nil
+	}
 
 	return srv.ServeStdio()
 }

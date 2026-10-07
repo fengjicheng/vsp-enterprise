@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +302,12 @@ func (s *Server) Shutdown() error {
 		}
 	}
 	return firstErr
+}
+
+// HTTPHandler returns a Streamable HTTP handler for the MCP server. Unlike
+// ServeStdio it supports many concurrent client sessions (used by --shared).
+func (s *Server) HTTPHandler() http.Handler {
+	return server.NewStreamableHTTPServer(s.mcpServer)
 }
 
 // ServeStdio starts the MCP server on stdin/stdout.
