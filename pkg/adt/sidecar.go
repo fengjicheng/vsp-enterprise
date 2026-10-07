@@ -293,19 +293,15 @@ func (s *SidecarManager) SendSTDIO(msg map[string]interface{}) (map[string]inter
 }
 
 // killOrphanedSidecars finds and kills any RfcProxyServer processes left over from previous runs.
-// Sidecars spawned by the current process (e.g. other RFC systems started in the
-// same run) are NOT killed — only truly orphaned processes from previous runs are.
+// Only truly orphaned sidecars (reparented to init/launchd, PPID 1) are killed. Sidecars whose
+// parent is still alive belong to this run or to another vsp process running in parallel
+// (e.g. a second MCP client session) and must not be touched.
 func (s *SidecarManager) killOrphanedSidecars() {
 	// Use pgrep to find Java processes running RfcProxyServer
 	out, err := exec.Command("pgrep", "-f", "RfcProxyServer").Output()
 	if err != nil {
 		return // No matches or pgrep not available
 	}
-
-	// Children of the current process belong to this run (multi-RFC-system setups
-	// start one sidecar per system). They must be excluded from the orphan cleanup,
-	// otherwise starting the sidecar for the next system would kill the previous one.
-	ownChildren := currentProcessChildren()
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
@@ -316,8 +312,8 @@ func (s *SidecarManager) killOrphanedSidecars() {
 		if err != nil {
 			continue
 		}
-		if ownChildren[pid] {
-			continue // spawned by this run, not orphaned
+		if parentPID(pid) != 1 {
+			continue // parent still alive, not orphaned
 		}
 		proc, err := os.FindProcess(pid)
 		if err != nil {
@@ -330,21 +326,17 @@ func (s *SidecarManager) killOrphanedSidecars() {
 	}
 }
 
-// currentProcessChildren returns the set of PIDs that are direct children of the
-// current process. Used to avoid killing sidecars spawned by this run during
-// orphan cleanup.
-func currentProcessChildren() map[int]bool {
-	children := make(map[int]bool)
-	out, err := exec.Command("pgrep", "-P", strconv.Itoa(os.Getpid())).Output()
+// parentPID returns the parent PID of pid, or -1 if it cannot be determined.
+func parentPID(pid int) int {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
-		return children // no children or pgrep not available
+		return -1
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if pid, err := strconv.Atoi(strings.TrimSpace(line)); err == nil {
-			children[pid] = true
-		}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return -1
 	}
-	return children
+	return ppid
 }
 
 // buildClasspath constructs the Java classpath from the JAR and JCo libraries.

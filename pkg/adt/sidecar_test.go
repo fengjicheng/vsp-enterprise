@@ -3,6 +3,7 @@ package adt
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -271,5 +272,17 @@ func assertContainsArg(t *testing.T, args []string, key, value string) {
 		t.Errorf("Arg %q not found in %v", key, args)
 	} else {
 		t.Errorf("Arg %q %q not found in %v", key, value, args)
+	}
+}
+
+func TestParentPID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ps not available on Windows")
+	}
+	if got, want := parentPID(os.Getpid()), os.Getppid(); got != want {
+		t.Errorf("parentPID(self) = %d, want %d", got, want)
+	}
+	if got := parentPID(-12345); got != -1 {
+		t.Errorf("parentPID(invalid) = %d, want -1", got)
 	}
 }
